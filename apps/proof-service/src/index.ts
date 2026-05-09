@@ -196,6 +196,7 @@ export interface SasAttestation {
   issuer: string;
   schemaType: string;
   claims: Partial<{
+    kycStatus: string;
     ageOver18: boolean;
     country: string;
   }>;

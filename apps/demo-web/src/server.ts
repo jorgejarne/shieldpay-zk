@@ -15,9 +15,60 @@ const merchantApiBaseUrl = process.env.MERCHANT_API_BASE_URL ?? "http://127.0.0.
 const mockSasBaseUrl = process.env.MOCK_SAS_BASE_URL ?? "http://127.0.0.1:3100";
 const verificationMode = process.env.VERIFICATION_MODE === "sas" ? "sas" : "mock";
 const issuerKeyId = process.env.SHIELDPAY_ISSUER_KEY_ID ?? "shieldpay_issuer_v1";
+const solanaCluster =
+  (process.env.SOLANA_CLUSTER as "localnet" | "devnet" | undefined) === "devnet" ? "devnet" : "localnet";
+const solanaRpcUrl = process.env.SOLANA_RPC_URL ?? "http://localhost:8899";
 
 let customerIdentity: DemoCustomerIdentity = generateDemoCustomerIdentity("buyer_demo_1");
 let storedCredential: ReturnType<typeof createMockCredentialEnvelope> | null = null;
+
+/** Mirrors “wallet” negative SAS demo; merged into ShieldPay lookup via {@link resolveSasNegativeForVerifier}. */
+const sasDemoNegativeSubjects = new Set<string>();
+
+function resolveSasNegativeForVerifier(req: Request, subject: string): boolean {
+  const raw = typeof req.query.negative === "string" ? req.query.negative.toLowerCase() : undefined;
+  if (raw === "true") return true;
+  if (raw === "false") return false;
+  return sasDemoNegativeSubjects.has(subject);
+}
+
+async function fetchMockSasLatestJson(subject: string, negative: boolean): Promise<{ status: number; payload: unknown }> {
+  const url = `${mockSasBaseUrl}/sas/attestations/latest?subject=${encodeURIComponent(subject)}&negative=${negative ? "true" : "false"}`;
+  const response = await fetch(url);
+  const body = await response.text();
+  try {
+    const payload = JSON.parse(body) as unknown;
+    return { status: response.status, payload };
+  } catch {
+    return {
+      status: 502,
+      payload: {
+        error: `Mock SAS at ${mockSasBaseUrl} did not return JSON. Start it with: npm run dev:mock-sas-service`,
+        detail: body.slice(0, 240),
+      },
+    };
+  }
+}
+
+/** Mock SAS may omit kycStatus on older builds; keep UI and recordings aligned with policy. */
+function ensureMockSasKycClaims(payload: unknown, negativeEffective: boolean): void {
+  if (!payload || typeof payload !== "object") return;
+  const attestation = (payload as { attestation?: unknown }).attestation;
+  if (!attestation || typeof attestation !== "object") return;
+  const row = attestation as { claims?: unknown };
+  if (!row.claims || typeof row.claims !== "object") {
+    row.claims = {};
+  }
+  const claims = row.claims as Record<string, unknown>;
+  const existing = claims.kycStatus;
+  if (
+    existing === undefined ||
+    existing === null ||
+    (typeof existing === "string" && existing.trim().length === 0)
+  ) {
+    claims.kycStatus = negativeEffective ? "REJECTED" : "VERIFIED";
+  }
+}
 
 app.get("/", (_req: Request, res: Response) => {
   res.type("html").send(renderHtml());
@@ -35,6 +86,8 @@ app.get("/api/config", (_req: Request, res: Response) => {
   res.json({
     verificationMode,
     merchantApiBaseUrl,
+    solanaCluster,
+    solanaRpcUrl,
   });
 });
 
@@ -95,20 +148,57 @@ app.post("/api/buyer/submit", async (req: Request, res: Response) => {
 });
 
 app.get("/api/sas/attestation", async (req: Request, res: Response) => {
-  const subject = String(req.query.subject ?? "");
+  const subject = String(req.query.subject ?? "").trim();
   const negative = String(req.query.negative ?? "false").toLowerCase() === "true";
   if (subject.length === 0) {
     return res.status(400).json({ error: "subject is required" });
   }
-  const response = await fetch(
-    `${mockSasBaseUrl}/sas/attestations/latest?subject=${encodeURIComponent(subject)}&negative=${negative ? "true" : "false"}`,
-  );
-  const payload = await response.json();
-  return res.status(response.status).json(payload);
+  try {
+    if (negative) {
+      sasDemoNegativeSubjects.add(subject);
+    } else {
+      sasDemoNegativeSubjects.delete(subject);
+    }
+    const { status, payload } = await fetchMockSasLatestJson(subject, negative);
+    if (status >= 200 && status < 300) {
+      ensureMockSasKycClaims(payload, negative);
+    }
+    return res.status(status).json(payload);
+  } catch (cause) {
+    const message = cause instanceof Error ? cause.message : String(cause);
+    console.error("[demo-web] SAS attestation fetch failed", { message, mockSasBaseUrl });
+    return res.status(502).json({ error: "failed to reach mock SAS", detail: message });
+  }
+});
+
+/**
+ * ShieldPay SAS lookup URL for local demo: same JSON as mock-sas, but merges {@link sasDemoNegativeSubjects}
+ * when `negative` is omitted (merchant-api only passes `?subject=`).
+ */
+app.get("/api/sas/attestations/latest", async (req: Request, res: Response) => {
+  const subjectTrimmed = String(req.query.subject ?? "").trim();
+  if (subjectTrimmed.length === 0) {
+    return res.status(400).json({ error: "subject query parameter is required" });
+  }
+  const negative = resolveSasNegativeForVerifier(req, subjectTrimmed);
+  try {
+    const { status, payload } = await fetchMockSasLatestJson(subjectTrimmed, negative);
+    if (status >= 200 && status < 300) {
+      ensureMockSasKycClaims(payload, negative);
+    }
+    return res.status(status).json(payload);
+  } catch (cause) {
+    const message = cause instanceof Error ? cause.message : String(cause);
+    console.error("[demo-web] SAS verifier proxy failed", { message, mockSasBaseUrl });
+    return res.status(502).json({ error: "failed to reach mock SAS", detail: message });
+  }
 });
 
 app.listen(PORT, () => {
   console.log(`[demo-web] running on http://127.0.0.1:${PORT}`);
+  console.log(
+    `[demo-web] SAS verifier proxy — set merchant-api SAS_ATTESTATION_ENDPOINT=http://127.0.0.1:${PORT}/api/sas/attestations/latest when using VERIFICATION_MODE=sas`,
+  );
 });
 
 function renderHtml(): string {
@@ -207,6 +297,14 @@ function renderHtml(): string {
       .modal-success.visible { display: block; }
       .modal-actions { padding: 0 22px 22px; display: flex; flex-direction: column; gap: 10px; }
       .modal-actions button { width: 100%; margin: 0; border-radius: 12px; padding: 14px; font-size: 15px; }
+      .solana-step-header { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; margin-bottom: 4px; }
+      .solana-step-header h3 { margin: 0; flex: 1 1 auto; min-width: 200px; }
+      .badge.solana-anchored { background: linear-gradient(135deg, #dcfce7 0%, #d1fae5 100%); color: #047857; border: 1px solid #a7f3d0; text-transform: none; letter-spacing: 0.01em; font-size: 12px; font-weight: 700; }
+      .tx-sig-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; }
+      code.tx-sig { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 13px; font-weight: 500; letter-spacing: 0.02em; line-height: 1.5; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 10px 12px; color: #0f172a; word-break: break-all; max-width: 100%; }
+      a.explorer-link { display: inline-flex; align-items: center; font-size: 13px; font-weight: 600; color: #1d4ed8; text-decoration: none; border-radius: 8px; padding: 8px 12px; border: 1px solid #bfdbfe; background: #eff6ff; }
+      a.explorer-link:hover { background: #dbeafe; border-color: #93c5fd; }
+      .privacy-callout { font-size: 13px; color: #475569; line-height: 1.55; margin: 0; padding: 12px 14px; background: #f8fafc; border-radius: 12px; border-left: 4px solid #94a3b8; }
     </style>
   </head>
   <body>
@@ -392,15 +490,18 @@ function renderHtml(): string {
           </div>
 
           <div class="card">
-            <h3 id="s6Title">Step 6: ShieldPay anchors result on Solana</h3>
+            <div class="solana-step-header">
+              <h3 id="s6Title">Step 6: ShieldPay anchors result on Solana</h3>
+              <span id="solanaAnchoredBadge" class="badge solana-anchored" hidden>Anchored on Solana</span>
+            </div>
             <div class="row"><div class="label">Result</div><div id="s5Policy" class="value muted">No result yet</div></div>
             <div class="row"><div class="label">Request ID</div><div id="receiptRequestId" class="value muted">Not created yet</div></div>
             <div class="row"><div class="label">Request PDA</div><div id="receiptRequestPda" class="value muted">Not created yet</div></div>
             <div class="row"><div class="label">Attestation digest</div><div id="s5Digest" class="value muted">No digest yet</div></div>
             <div class="row"><div class="label">Verification mode</div><div id="receiptMode" class="value muted">Loading...</div></div>
             <div class="row"><div class="label">Verifier key ID</div><div id="receiptVerifier" class="value muted">Not available yet</div></div>
-            <div class="row"><div class="label">Solana tx signature</div><div id="s5Tx" class="value muted">Not anchored yet</div></div>
-            <div class="row"><div class="label">On-chain note</div><div class="value muted">Only verification result and digest are stored on-chain. Personal data is not stored on-chain.</div></div>
+            <div class="row"><div class="label">Solana tx signature</div><div class="value"><div class="tx-sig-row"><code id="s5Tx" class="tx-sig muted">Not anchored yet</code><a id="solanaExplorerLink" class="explorer-link" href="#" target="_blank" rel="noopener noreferrer" hidden>Open Explorer</a></div></div></div>
+            <div class="row"><div class="label">On-chain note</div><div class="value"><p id="s6PrivacyNote" class="privacy-callout">Only verification result and attestation digest are stored on-chain. Personal data is not stored on-chain.</p></div></div>
             <div class="row"><div class="label">Stage status</div><div class="value"><span id="s6StageStatus" class="status">PENDING</span></div></div>
           </div>
         </div>
@@ -417,7 +518,10 @@ function renderHtml(): string {
       let currentCredential = null;
       let currentSasAttestation = null;
       let currentMode = "mock";
+      /** Ed25519 pubkey hex — shown in UI as “buyer wallet”. */
       let buyerWallet = "";
+      /** Same id as proof submission.subjectId / SAS subjectWallet (e.g. buyer_demo_1). Must match for negative SAS demo. */
+      let sasBuyerSubjectId = "";
       const logs = [];
       let signatureReady = false;
       let simulatedSignature = null;
@@ -425,6 +529,9 @@ function renderHtml(): string {
       let finalVerificationStatus = null;
       let proofSubmitted = false;
       let lastVerificationAt = "";
+      let lastSolanaTxSignature = "";
+      let solanaClusterCfg = "localnet";
+      let solanaRpcUrlCfg = "http://localhost:8899";
 
       async function call(path, method = "GET", body) {
         const res = await fetch(path, {
@@ -448,6 +555,38 @@ function renderHtml(): string {
         if (!v || typeof v !== "string") return "n/a";
         if (v.length <= 20) return v;
         return v.slice(0, 8) + "..." + v.slice(-8);
+      }
+
+      function buildSolanaExplorerTxUrl(fullSignature) {
+        var base = "https://explorer.solana.com/tx/" + encodeURIComponent(fullSignature);
+        if (solanaClusterCfg === "devnet") {
+          return base + "?cluster=devnet";
+        }
+        return base + "?cluster=custom&customUrl=" + encodeURIComponent(solanaRpcUrlCfg);
+      }
+
+      function applySolanaTxDisplay(shortLabel, fullSignature) {
+        lastSolanaTxSignature = typeof fullSignature === "string" ? fullSignature : "";
+        var txEl = document.getElementById("s5Tx");
+        var linkEl = document.getElementById("solanaExplorerLink");
+        var badge = document.getElementById("solanaAnchoredBadge");
+        txEl.textContent = shortLabel;
+        var isPlaceholder = shortLabel === "Not anchored yet" || shortLabel === "pending";
+        txEl.classList.toggle("muted", isPlaceholder);
+        var hasRealSig = lastSolanaTxSignature.length > 0;
+        if (hasRealSig) {
+          linkEl.href = buildSolanaExplorerTxUrl(lastSolanaTxSignature);
+          linkEl.hidden = false;
+          badge.hidden = false;
+        } else {
+          linkEl.hidden = true;
+          linkEl.removeAttribute("href");
+          badge.hidden = true;
+        }
+      }
+
+      function resetSolanaAnchorSection() {
+        applySolanaTxDisplay("Not anchored yet", "");
       }
 
       function setActiveTab(tabId) {
@@ -594,7 +733,7 @@ function renderHtml(): string {
 
       function renderFlowChecklist(trace, hasChallengeSignature, hasSasOrCredential, txSignature) {
         const items = [
-          ["wallet connected / buyer wallet selected", Boolean(buyerWallet)],
+          ["wallet connected / buyer wallet selected", Boolean(sasBuyerSubjectId || buyerWallet)],
           ["challenge signed", hasChallengeSignature],
           ["verification mode selected", currentMode === "mock" || currentMode === "sas"],
           ["credential or SAS attestation found", hasSasOrCredential],
@@ -622,6 +761,8 @@ function renderHtml(): string {
       async function initialize() {
         const config = await call("/api/config");
         currentMode = (config.payload && config.payload.verificationMode) || "mock";
+        solanaClusterCfg = (config.payload && config.payload.solanaCluster) || "localnet";
+        solanaRpcUrlCfg = (config.payload && config.payload.solanaRpcUrl) || "http://localhost:8899";
         document.getElementById("modeBadge").innerHTML =
           '<span class="badge mode">' + (currentMode === "sas" ? "SAS attestation mode" : "Mock signed credential mode") + '</span>';
         document.getElementById("receiptMode").textContent = currentMode.toUpperCase();
@@ -631,12 +772,24 @@ function renderHtml(): string {
 
         const customer = await call("/api/customer");
         buyerWallet = customer.payload && customer.payload.buyerWallet ? customer.payload.buyerWallet : "";
+        sasBuyerSubjectId =
+          (customer.payload && customer.payload.subjectId) ? String(customer.payload.subjectId) : buyerWallet;
         document.getElementById("walletBuyer").textContent = shortValue(buyerWallet);
         document.getElementById("checkoutBuyerWallet").textContent = shortValue(buyerWallet);
-        document.getElementById("s1Subject").textContent = shortValue(buyerWallet);
+        document.getElementById("s1Subject").textContent =
+          currentMode === "sas"
+            ? sasBuyerSubjectId + " · " + shortValue(buyerWallet)
+            : shortValue(buyerWallet);
         syncAttestationSummary();
         renderCheckoutDecision();
-        logLine("[mode] selected mode=" + currentMode + " buyerWallet=" + shortValue(buyerWallet));
+        logLine(
+          "[mode] selected mode=" +
+            currentMode +
+            " sasSubject=" +
+            sasBuyerSubjectId +
+            " buyerWallet=" +
+            shortValue(buyerWallet),
+        );
         updateButtons();
       }
 
@@ -669,16 +822,24 @@ function renderHtml(): string {
       }
 
       async function loadSasAttestation(negative = false) {
+        const sasSubject = sasBuyerSubjectId || buyerWallet;
+        if (!sasSubject) return;
         const result = await call(
-          "/api/sas/attestation?subject=" + encodeURIComponent(buyerWallet) + (negative ? "&negative=true" : "")
+          "/api/sas/attestation?subject=" + encodeURIComponent(sasSubject) + (negative ? "&negative=true" : "")
         );
         if (result.status >= 400) return;
         currentSasAttestation = result.payload.attestation;
         currentCredential = null;
         document.getElementById("s1Issuer").textContent = currentSasAttestation.issuer;
         document.getElementById("s1Type").textContent = currentSasAttestation.schemaType;
+        var cl = currentSasAttestation.claims || {};
         document.getElementById("s1Claims").textContent =
-          "kycStatus=" + (currentSasAttestation.claims.kycStatus || "UNKNOWN") + ", country=" + currentSasAttestation.claims.country + ", ageOver18=" + currentSasAttestation.claims.ageOver18;
+          "kycStatus=" +
+          (cl.kycStatus != null && String(cl.kycStatus) !== "" ? String(cl.kycStatus) : "UNKNOWN") +
+          ", country=" +
+          (cl.country != null ? cl.country : "—") +
+          ", ageOver18=" +
+          (cl.ageOver18 !== undefined ? cl.ageOver18 : "—");
         document.getElementById("s1Signature").textContent = shortValue(currentSasAttestation.digestHex);
         document.getElementById("s1AttestationState").textContent = negative ? "Negative" : "Valid";
         document.getElementById("s2Note").textContent = negative
@@ -721,6 +882,7 @@ function renderHtml(): string {
         setStageStatus("s4StageStatus", "PENDING");
         setStageStatus("s5VerifyStageStatus", "PENDING");
         setStageStatus("s6StageStatus", "PENDING");
+        resetSolanaAnchorSection();
         document.getElementById("s4Input").textContent =
           "Awaiting buyer signature and proof submission (Merchant Checkout modal).";
         updateButtons();
@@ -796,7 +958,12 @@ function renderHtml(): string {
           metadata.transactionSignature
         );
         document.getElementById("s5Digest").textContent = metadata.attestationDigest || "n/a";
-        document.getElementById("s5Tx").textContent = shortValue(metadata.transactionSignature || "pending");
+        var rawSig = metadata.transactionSignature;
+        if (rawSig) {
+          applySolanaTxDisplay(shortValue(rawSig), rawSig);
+        } else {
+          applySolanaTxDisplay("pending", "");
+        }
         document.getElementById("walletVerifier").textContent = result.payload.verifierKeyId || "n/a";
         document.getElementById("receiptVerifier").textContent = result.payload.verifierKeyId || "n/a";
         finalVerificationStatus =
@@ -809,7 +976,7 @@ function renderHtml(): string {
         progressEl.textContent = "Verification complete.";
         closeVerificationModal();
         logLine("[mode] selected mode=" + currentMode);
-        logLine("[proof-service] buyer wallet=" + shortValue(buyerWallet));
+        logLine("[proof-service] sasSubject=" + sasBuyerSubjectId + " buyerWallet=" + shortValue(buyerWallet));
         logLine("[sas] attestation found=" + String(currentMode === "sas" ? Boolean(currentSasAttestation) : Boolean(currentCredential)));
         logLine("[sas] issuer trusted=" + String(result.payload.verificationTrace?.issuerTrusted ?? false));
         logLine("[policy] passed=" + String(result.payload.result?.status === "APPROVED"));

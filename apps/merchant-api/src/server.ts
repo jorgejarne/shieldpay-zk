@@ -25,7 +25,8 @@ const VERIFIER_KEY_ID = process.env.VERIFIER_KEY_ID ?? "verifier_global_v1";
 const VERIFIER_PRIVATE_KEY_HEX = process.env.VERIFIER_PRIVATE_KEY_HEX ?? "34".repeat(32);
 const VERIFICATION_MODE = parseVerificationMode(process.env.VERIFICATION_MODE);
 const SAS_ATTESTATION_ENDPOINT =
-  process.env.SAS_ATTESTATION_ENDPOINT ?? "http://127.0.0.1:3100/sas/attestations/latest";
+  process.env.SAS_ATTESTATION_ENDPOINT ??
+  "http://127.0.0.1:4173/api/sas/attestations/latest";
 const SAS_TRUSTED_ISSUERS = toSet(process.env.SAS_TRUSTED_ISSUERS ?? "shieldpay_sas_issuer_v1");
 const SAS_REQUIRED_SCHEMA = process.env.SAS_REQUIRED_SCHEMA ?? "KYC_VERIFIED";
 const SAS_REQUIRE_AGE_OVER_18 = (process.env.SAS_REQUIRE_AGE_OVER_18 ?? "true").toLowerCase() !== "false";

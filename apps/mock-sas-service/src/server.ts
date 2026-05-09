@@ -22,6 +22,7 @@ app.get("/sas/attestations/latest", (req: Request, res: Response) => {
     issuer: negative ? "untrusted_issuer" : "shieldpay_sas_issuer_v1",
     schemaType: "KYC_VERIFIED",
     claims: {
+      kycStatus: negative ? "REJECTED" : "VERIFIED",
       ageOver18: negative ? false : true,
       country: negative ? "US" : "DE",
     },

@@ -152,6 +152,7 @@ VERIFICATION_MODE=sas
   - Checks whether the buyer wallet has a valid Solana Attestation Service (SAS) attestation.
   - Applies ShieldPay policy checks (trusted issuer, schema/type like `KYC_VERIFIED`, optional claims like `ageOver18` and allowed country).
   - Keeps raw KYC attributes off-chain; only decision references/hashes are anchored.
+  - **Local demo:** run `npm run dev:mock-sas-service` (port 3100) as well as demo-web and merchant-api. By default the merchant resolves SAS via demo-web (`http://127.0.0.1:4173/api/sas/attestations/latest`), which forwards to the mock SAS and applies the Issuer-tab “negative attestation” choice; override with `SAS_ATTESTATION_ENDPOINT=http://127.0.0.1:3100/sas/attestations/latest` if you omit demo-web. In the Issuer / SAS UI, **`GET /api/sas/attestation?subject=…&negative=…`** also pins that buyer for verifier lookups (single request—no separate “demo mode” POST).
 
 ### Local mock SAS endpoint
 
@@ -161,21 +162,26 @@ The local SAS mock service exposes:
 
 Example:
 
+Use the same `subject` string the buyer submits as `ProofSubmission.subjectId` (demo default is `buyer_demo_1`, not the hex pubkey):
+
 ```bash
-curl "http://127.0.0.1:3100/sas/attestations/latest?subject=buyer_wallet_1"
+curl "http://127.0.0.1:3100/sas/attestations/latest?subject=buyer_demo_1"
 ```
 
 Negative policy demo response:
 
 ```bash
-curl "http://127.0.0.1:3100/sas/attestations/latest?subject=buyer_wallet_1&negative=true"
+curl "http://127.0.0.1:3100/sas/attestations/latest?subject=buyer_demo_1&negative=true"
 ```
 
 When `negative=true`, the mock attestation returns:
 
 - `issuer=untrusted_issuer`
+- `claims.kycStatus=REJECTED`
 - `claims.country=US`
 - `claims.ageOver18=false`
+
+When `negative` is false, `claims.kycStatus` is `VERIFIED`.
 
 ### Why SAS
 
