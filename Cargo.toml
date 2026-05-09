@@ -1,0 +1,11 @@
+[workspace]
+members = [
+  "programs/shieldpay_gatekeeper"
+]
+resolver = "2"
+
+[workspace.lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = ['values(feature, "anchor-debug", "custom-heap", "custom-panic")'] }
+
+[profile.release]
+overflow-checks = true

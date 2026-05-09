@@ -1,0 +1,20 @@
+{
+  "name": "@shieldpay/mock-sas-service",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/server.ts",
+  "types": "src/server.ts",
+  "exports": {
+    ".": "./src/server.ts"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run --passWithNoTests",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "dev": "tsx src/server.ts"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  }
+}

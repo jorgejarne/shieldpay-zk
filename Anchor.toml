@@ -1,0 +1,13 @@
+[features]
+seeds = false
+skip-lint = false
+
+[programs.localnet]
+shieldpay_gatekeeper = "Fg6PaFpoGXkYsidMpWxTWqkYBqR8AMW2n2Kk7rM1Nq3J"
+
+[provider]
+cluster = "Localnet"
+wallet = "~/.config/solana/id.json"
+
+[scripts]
+test = "anchor test"

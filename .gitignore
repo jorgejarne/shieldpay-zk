@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+
+# Rust / Anchor
+target/
+.anchor/
+
+# Solana local validator ledger (often root-owned; never commit)
+test-ledger/
+
+# Build outputs
+dist/
+build/
+
+# Environment and secrets (use .env.example for docs only)
+.env
+.env.*
+!.env.example
+
+# Logs and OS noise
+*.log
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Local backups
+*.backup
