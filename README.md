@@ -135,7 +135,9 @@ Test file: `tests/localnet-runtime.test.ts`
 4. Merchant panel polls:
    - API status via `GET /requests/:requestId/status`
    - anchored status via `GET /requests/:requestId/anchored-status`
+
 <img width="1267" height="788" alt="scheme" src="https://github.com/user-attachments/assets/6542a236-c70d-4495-9af9-1467d7a2eaf3" />
+
 ## Verification Modes (Mock vs SAS)
 
 ShieldPay supports two verification backends selected with:
